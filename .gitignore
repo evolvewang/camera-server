@@ -3,7 +3,7 @@
 .venv/
 __pycache__/
 *.py[cod]
-Log/
+log/
 
 # codex
 AGENTS.md

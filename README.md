@@ -29,39 +29,39 @@ camera:
 python zmq_server.py
 ```
 
-服务端、视频流、客户端和日志的项目级参数统一位于 `configs/config.yaml`：
+服务端、视频流和日志的项目级参数统一位于 `configs/config.yaml`：
 
 | 配置 | 含义 |
 | --- | --- |
 | `camera.device_sn` | 物理相机 SN，同时是 ZMQ 订阅 topic |
 | `stream.jpeg_quality` | JPEG 质量，范围 1–100 |
 | `zmq.publisher_endpoint` | 服务端 PUB 监听端点 |
-| `zmq.subscriber_endpoint` | 客户端 SUB 连接端点 |
-| `zmq.send_hwm` / `receive_hwm` | 实时消息高水位限制 |
-| `zmq.receive_timeout_ms` | 客户端接收超时 |
-| `client.show` | 是否显示 OpenCV 预览窗口 |
-| `logging.*` | 日志级别、目录、文件名和保留天数 |
+| `zmq.send_hwm` | 服务端发送队列的高水位限制 |
+| `logging.*` | 日志级别、文件名和保留天数；日志目录固定为项目根目录 `log/` |
 
 本机只连接一台 Orbbec 且 `device_sn` 留空时，服务端可以自动选中该设备；
-客户端必须配置明确的 SN 才能订阅。日志同时输出到控制台和 `Log/` 目录。
+客户端必须配置明确的 SN 才能订阅。日志同时输出到控制台和 `log/` 目录。
 按 `Ctrl+C` 时，服务会依次关闭发布器和相机。
 
 ## 外部连接方法
 
-同一台主机运行客户端时，保持以下配置：
+同一台主机运行客户端时，在 `zmq_client.py` 的入口块中设置：
 
-```yaml
-zmq:
-  subscriber_endpoint: "tcp://127.0.0.1:5558"
+```python
+device_sn = "<相机序列号>"
+endpoint = "tcp://127.0.0.1:5558"
+receive_timeout_ms = 5000
+receive_hwm = 2
+show = True
 ```
 
 在另一个已激活 `camera-server` 环境的 Anaconda Prompt 中运行：
 
 ```powershell
-python -m service.camera_client
+python zmq_client.py
 ```
 
-另一台主机连接时，把 `subscriber_endpoint` 中的 `127.0.0.1` 改成相机主机的 LAN IP，
+另一台主机连接时，把 `endpoint` 中的 `127.0.0.1` 改成相机主机的 LAN IP，
 例如 `tcp://192.168.1.100:5558`，并确认 Windows 防火墙允许 TCP 5558 入站。
 
 在自己的 Python 程序中使用：

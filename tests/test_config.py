@@ -1,43 +1,30 @@
-import tempfile
 import unittest
-from pathlib import Path
 
-from core.config import CONFIG_PATH, ConfigError, load_config
+from core.config import CONFIG_PATH, ROOT_DIR, load_config
 
 
 class ProjectConfigTest(unittest.TestCase):
-    def test_loads_repository_config(self):
-        config = load_config(CONFIG_PATH)
+    def test_config_path_is_relative_to_project_root(self):
+        self.assertEqual(CONFIG_PATH, ROOT_DIR / "configs" / "config.yaml")
+        self.assertTrue(CONFIG_PATH.exists())
 
-        self.assertEqual(config.project.name, "camera-server")
-        self.assertTrue(config.camera.device_sn)
-        self.assertGreaterEqual(config.stream.jpeg_quality, 1)
-        self.assertLessEqual(config.stream.jpeg_quality, 100)
-        self.assertTrue(config.zmq.publisher_endpoint.startswith("tcp://"))
-        self.assertTrue(config.zmq.subscriber_endpoint.startswith("tcp://"))
-        self.assertGreater(config.zmq.send_hwm, 0)
-        self.assertGreater(config.zmq.receive_hwm, 0)
-        self.assertGreater(config.zmq.receive_timeout_ms, 0)
-        self.assertIsInstance(config.client.show, bool)
+    def test_loads_repository_config_as_dictionary(self):
+        config = load_config()
+
+        self.assertIsInstance(config, dict)
+        self.assertEqual(config["project"]["name"], "camera-server")
+        self.assertTrue(config["camera"]["device_sn"])
+        self.assertTrue(config["zmq"]["publisher_endpoint"].startswith("tcp://"))
+        self.assertGreater(config["zmq"]["send_hwm"], 0)
+        self.assertNotIn("subscriber_endpoint", config["zmq"])
+        self.assertNotIn("receive_hwm", config["zmq"])
+        self.assertNotIn("receive_timeout_ms", config["zmq"])
+        self.assertNotIn("client", config)
         self.assertIn(
-            config.logging.level,
+            config["logging"]["level"].upper(),
             {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"},
         )
-        self.assertTrue(config.logging.directory)
-        self.assertTrue(config.logging.filename)
-        self.assertGreater(config.logging.backup_count, 0)
-
-    def test_rejects_unknown_configuration_key(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_path = Path(temp_dir) / "config.yaml"
-            config_path.write_text("unexpected: true\n", encoding="utf-8")
-
-            with self.assertRaises(ConfigError):
-                load_config(config_path)
-
-    def test_reports_missing_configuration_file(self):
-        with self.assertRaises(ConfigError):
-            load_config("missing-camera-server-config.yaml")
+        self.assertGreater(config["logging"]["backup_count"], 0)
 
 
 if __name__ == "__main__":

@@ -7,7 +7,6 @@ import cv2
 import numpy as np
 import zmq
 
-from core.config import app_config
 from core.logger import get_logger
 from service.video_protocol import JPEG_ENCODING, PROTOCOL_VERSION
 
@@ -111,17 +110,23 @@ class ZmqVideoSubscriber:
         self.close()
 
 
-def main() -> int:
-    if not app_config.camera.device_sn:
-        logger.error("configs/config.yaml 中的 camera.device_sn 不能为空")
+def main(
+    device_sn: str,
+    endpoint: str,
+    receive_timeout_ms: Optional[int],
+    receive_hwm: int,
+    show: bool,
+) -> int:
+    if not device_sn:
+        logger.error("device_sn 不能为空")
         return 1
 
     try:
         with ZmqVideoSubscriber(
-            device_sn=app_config.camera.device_sn,
-            endpoint=app_config.zmq.subscriber_endpoint,
-            receive_timeout_ms=app_config.zmq.receive_timeout_ms,
-            receive_hwm=app_config.zmq.receive_hwm,
+            device_sn=device_sn,
+            endpoint=endpoint,
+            receive_timeout_ms=receive_timeout_ms,
+            receive_hwm=receive_hwm,
         ) as subscriber:
             while True:
                 metadata, frame = subscriber.receive()
@@ -129,8 +134,8 @@ def main() -> int:
                     f"frame_id={metadata['frame_id']} "
                     f"timestamp={metadata['timestamp']:.6f} shape={frame.shape}"
                 )
-                if app_config.client.show:
-                    cv2.imshow(app_config.camera.device_sn, frame)
+                if show:
+                    cv2.imshow(device_sn, frame)
                     if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                         break
     except KeyboardInterrupt:
@@ -144,4 +149,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    main()
+    device_sn = "AY6966300HW"
+    endpoint = "tcp://127.0.0.1:5558"
+    receive_timeout_ms = 5000
+    receive_hwm = 2
+    show = True
+    main(device_sn, endpoint, receive_timeout_ms, receive_hwm, show)

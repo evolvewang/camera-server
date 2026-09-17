@@ -41,13 +41,13 @@ class ZmqVideoServer:
         self._register_signal_handlers()
 
         try:
-            device_sn = resolve_device_sn(app_config.camera.device_sn)
+            device_sn = resolve_device_sn(app_config["camera"]["device_sn"])
             self.camera = OrbbecCamera(device_sn=device_sn)
             self.publisher = ZmqVideoPublisher(
                 camera=self.camera,
-                endpoint=app_config.zmq.publisher_endpoint,
-                jpeg_quality=app_config.stream.jpeg_quality,
-                send_hwm=app_config.zmq.send_hwm,
+                endpoint=app_config["zmq"]["publisher_endpoint"],
+                jpeg_quality=app_config["stream"]["jpeg_quality"],
+                send_hwm=app_config["zmq"]["send_hwm"],
             )
 
             self.camera.start()
@@ -56,7 +56,7 @@ class ZmqVideoServer:
                 "Camera Server ready: device_sn=%s topic=%s bind=%s",
                 device_sn,
                 device_sn,
-                app_config.zmq.publisher_endpoint,
+                app_config["zmq"]["publisher_endpoint"],
             )
 
             while not self.stop_requested.wait(0.5):
