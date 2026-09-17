@@ -1,0 +1,27 @@
+project:
+  name: "camera-server"
+
+# 当前部署使用的物理相机序列号，同时也是 ZMQ SUB 订阅通道名称。
+camera:
+  device_sn: "AY6966300HW"
+
+stream:
+  jpeg_quality: 85
+
+zmq:
+  # 服务端监听地址。0.0.0.0 表示允许其他主机连接。
+  publisher_endpoint: "tcp://0.0.0.0:5558"
+  # 客户端连接地址。跨主机使用时改为相机主机的实际 IP。
+  subscriber_endpoint: "tcp://127.0.0.1:5558"
+  send_hwm: 2
+  receive_hwm: 2
+  receive_timeout_ms: 5000
+
+client:
+  show: true
+
+logging:
+  level: "INFO"
+  directory: "Log"
+  filename: "camera-server.log"
+  backup_count: 30

@@ -4,9 +4,6 @@ The rest of the application only sees OpenCV BGR ``ndarray`` frames. Orbbec
 SDK objects and pixel-format conversion stay in this module.
 """
 
-from __future__ import annotations
-
-import logging
 import threading
 import time
 from typing import Optional, Tuple
@@ -15,8 +12,10 @@ import cv2
 import numpy as np
 import pyorbbecsdk as ob
 
+from core.logger import get_logger
 
-LOGGER = logging.getLogger(__name__)
+
+logger = get_logger(__name__)
 FramePacket = Tuple[int, float, np.ndarray]
 
 
@@ -72,7 +71,7 @@ class OrbbecCamera:
 
         self.device = device_list.get_device_by_serial_number(self.device_sn)
         device_info = self.device.get_device_info()
-        LOGGER.info(
+        logger.info(
             "Orbbec device selected: name=%s serial=%s firmware=%s connection=%s",
             device_info.get_name(),
             device_info.get_serial_number(),
@@ -86,7 +85,7 @@ class OrbbecCamera:
             ob.OBSensorType.COLOR_SENSOR
         )
         color_profile = color_profiles.get_default_video_stream_profile()
-        LOGGER.info(
+        logger.info(
             "Default color stream: %sx%s@%s format=%s",
             color_profile.get_width(),
             color_profile.get_height(),
@@ -110,7 +109,7 @@ class OrbbecCamera:
             daemon=True,
         )
         self._thread.start()
-        LOGGER.info("Orbbec camera started: serial=%s", self.device_sn)
+        logger.info("Orbbec camera started: serial=%s", self.device_sn)
 
     def stop(self) -> None:
         """Stop capture and release the pipeline; repeated calls are harmless."""
@@ -119,7 +118,7 @@ class OrbbecCamera:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             if self._thread.is_alive():
-                LOGGER.warning(
+                logger.warning(
                     "Capture worker did not stop within 2 seconds: serial=%s",
                     self.device_sn,
                 )
@@ -135,7 +134,7 @@ class OrbbecCamera:
             self._frame = None
             self._timestamp = None
 
-        LOGGER.info("Orbbec camera stopped: serial=%s", self.device_sn)
+        logger.info("Orbbec camera stopped: serial=%s", self.device_sn)
 
     def _capture_loop(self) -> None:
         while self._running.is_set():
@@ -161,7 +160,7 @@ class OrbbecCamera:
             except Exception as exc:  # SDK errors must not silently kill capture.
                 if self._running.is_set():
                     self._capture_error = exc
-                    LOGGER.exception(
+                    logger.exception(
                         "Orbbec capture failed; retrying: serial=%s", self.device_sn
                     )
                     time.sleep(0.1)

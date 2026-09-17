@@ -6,12 +6,13 @@ import uuid
 import numpy as np
 import zmq
 
-from service.camera_client import ZmqVideoSubscriber
+from zmq_client import ZmqVideoSubscriber
 from service.zmq_publisher import ZmqVideoPublisher
 
 
 class FakeCamera:
-    def __init__(self):
+    def __init__(self, device_sn="TEST_SN"):
+        self.device_sn = device_sn
         self._lock = threading.Lock()
         self._packet = None
         self._error = None
@@ -38,9 +39,9 @@ class ZmqStreamTest(unittest.TestCase):
         self.camera = FakeCamera()
         self.publisher = ZmqVideoPublisher(
             camera=self.camera,
-            camera_id="TEST_CAM",
             endpoint=self.endpoint,
             jpeg_quality=90,
+            send_hwm=2,
             context=self.context,
         )
         self.publisher.start()
@@ -51,9 +52,10 @@ class ZmqStreamTest(unittest.TestCase):
 
     def test_publishes_and_decodes_a_frame_with_metadata(self):
         subscriber = ZmqVideoSubscriber(
+            device_sn="TEST_SN",
             endpoint=self.endpoint,
-            camera_id="TEST_CAM",
             receive_timeout_ms=1000,
+            receive_hwm=2,
             context=self.context,
         )
         try:
@@ -64,7 +66,8 @@ class ZmqStreamTest(unittest.TestCase):
 
             metadata, decoded = subscriber.receive()
 
-            self.assertEqual(metadata["camera_id"], "TEST_CAM")
+            self.assertEqual(metadata["protocol_version"], 1)
+            self.assertEqual(metadata["device_sn"], "TEST_SN")
             self.assertEqual(metadata["frame_id"], 7)
             self.assertEqual(metadata["timestamp"], 1234.5)
             self.assertEqual(metadata["width"], 32)
@@ -77,9 +80,10 @@ class ZmqStreamTest(unittest.TestCase):
 
     def test_receive_times_out_when_camera_has_no_frame(self):
         subscriber = ZmqVideoSubscriber(
+            device_sn="TEST_SN",
             endpoint=self.endpoint,
-            camera_id="TEST_CAM",
             receive_timeout_ms=50,
+            receive_hwm=2,
             context=self.context,
         )
         try:
@@ -104,13 +108,30 @@ class ZmqStreamTest(unittest.TestCase):
 
 
 class PublisherValidationTest(unittest.TestCase):
+    def test_rejects_camera_without_device_sn(self):
+        with self.assertRaises(ValueError):
+            ZmqVideoPublisher(
+                FakeCamera(device_sn=""),
+                endpoint="inproc://invalid-camera",
+                jpeg_quality=85,
+                send_hwm=2,
+            )
+
     def test_rejects_invalid_jpeg_quality(self):
         with self.assertRaises(ValueError):
-            ZmqVideoPublisher(FakeCamera(), jpeg_quality=0)
+            ZmqVideoPublisher(
+                FakeCamera(),
+                endpoint="inproc://invalid-quality",
+                jpeg_quality=0,
+                send_hwm=2,
+            )
 
     def test_reports_bind_failure_from_start(self):
         publisher = ZmqVideoPublisher(
-            FakeCamera(), endpoint="not-a-valid-zmq-transport://camera"
+            FakeCamera(),
+            endpoint="not-a-valid-zmq-transport://camera",
+            jpeg_quality=85,
+            send_hwm=2,
         )
         with self.assertRaises(RuntimeError):
             publisher.start()

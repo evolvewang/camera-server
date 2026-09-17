@@ -1,0 +1,93 @@
+"""Root entry point for the Orbbec RGB ZeroMQ service."""
+
+import signal
+import threading
+
+from camera.orbbec_camera import OrbbecCamera, discover_device_serial_numbers
+from core.config import app_config
+from core.logger import get_logger
+from service.zmq_publisher import ZmqVideoPublisher
+
+
+logger = get_logger(__name__)
+
+
+def resolve_device_sn(requested_sn):
+    if requested_sn:
+        return requested_sn
+
+    serial_numbers = discover_device_serial_numbers()
+    if len(serial_numbers) == 1:
+        logger.info(
+            "Automatically selected the only Orbbec device: %s",
+            serial_numbers[0],
+        )
+        return serial_numbers[0]
+    if not serial_numbers:
+        raise RuntimeError("没有发现 Orbbec 相机")
+    raise RuntimeError(
+        f"发现多台 Orbbec 相机 {serial_numbers}，"
+        "请在 configs/config.yaml 中配置 camera.device_sn"
+    )
+
+
+class ZmqVideoServer:
+    def __init__(self):
+        self.camera = None
+        self.publisher = None
+        self.stop_requested = threading.Event()
+
+    def start(self):
+        self._register_signal_handlers()
+
+        try:
+            device_sn = resolve_device_sn(app_config.camera.device_sn)
+            self.camera = OrbbecCamera(device_sn=device_sn)
+            self.publisher = ZmqVideoPublisher(
+                camera=self.camera,
+                endpoint=app_config.zmq.publisher_endpoint,
+                jpeg_quality=app_config.stream.jpeg_quality,
+                send_hwm=app_config.zmq.send_hwm,
+            )
+
+            self.camera.start()
+            self.publisher.start()
+            logger.info(
+                "Camera Server ready: device_sn=%s topic=%s bind=%s",
+                device_sn,
+                device_sn,
+                app_config.zmq.publisher_endpoint,
+            )
+
+            while not self.stop_requested.wait(0.5):
+                if self.publisher.error is not None:
+                    raise RuntimeError("ZMQ 发布线程异常退出") from self.publisher.error
+        except KeyboardInterrupt:
+            logger.info("Camera Server interrupted by user")
+        except Exception:
+            logger.exception("Camera Server stopped because of an error")
+        finally:
+            self.stop()
+
+    def stop(self):
+        self.stop_requested.set()
+        if self.publisher is not None:
+            self.publisher.stop()
+        if self.camera is not None:
+            self.camera.stop()
+        logger.info("Camera Server stopped")
+
+    def _register_signal_handlers(self):
+        def request_stop(signum, frame):
+            logger.info("Stop requested by signal %s", signum)
+            self.stop_requested.set()
+
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, request_stop)
+        if hasattr(signal, "SIGINT"):
+            signal.signal(signal.SIGINT, request_stop)
+
+
+if __name__ == "__main__":
+    server = ZmqVideoServer()
+    server.start()

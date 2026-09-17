@@ -1,9 +1,6 @@
 """Low-latency JPEG-over-ZeroMQ video publisher."""
 
-from __future__ import annotations
-
 import json
-import logging
 import threading
 import time
 from typing import Optional
@@ -11,8 +8,11 @@ from typing import Optional
 import cv2
 import zmq
 
+from core.logger import get_logger
+from service.video_protocol import JPEG_ENCODING, PROTOCOL_VERSION
 
-LOGGER = logging.getLogger(__name__)
+
+logger = get_logger(__name__)
 
 
 class ZmqVideoPublisher:
@@ -21,20 +21,32 @@ class ZmqVideoPublisher:
     def __init__(
         self,
         camera,
-        camera_id: str = "CAM_01",
-        endpoint: str = "tcp://0.0.0.0:5558",
-        jpeg_quality: int = 85,
+        endpoint: str,
+        jpeg_quality: int,
+        send_hwm: int,
         context: Optional[zmq.Context] = None,
     ):
-        if not camera_id:
-            raise ValueError("camera_id 不能为空")
-        if not 1 <= jpeg_quality <= 100:
+        device_sn = getattr(camera, "device_sn", None)
+        if not isinstance(device_sn, str) or not device_sn:
+            raise ValueError("camera.device_sn 不能为空")
+        if (
+            isinstance(jpeg_quality, bool)
+            or not isinstance(jpeg_quality, int)
+            or not 1 <= jpeg_quality <= 100
+        ):
             raise ValueError("jpeg_quality 必须在 1 到 100 之间")
+        if (
+            isinstance(send_hwm, bool)
+            or not isinstance(send_hwm, int)
+            or send_hwm <= 0
+        ):
+            raise ValueError("send_hwm 必须是正整数")
 
         self.camera = camera
-        self.camera_id = camera_id
+        self.device_sn = device_sn
         self.endpoint = endpoint
         self.jpeg_quality = jpeg_quality
+        self.send_hwm = send_hwm
         self._context = context
         self._owns_context = context is None
 
@@ -59,7 +71,7 @@ class ZmqVideoPublisher:
         self._thread = threading.Thread(
             target=self._publish_loop,
             daemon=True,
-            name=f"ZmqVideoPublisher-{self.camera_id}",
+            name=f"ZmqVideoPublisher-{self.device_sn}",
         )
         self._thread.start()
 
@@ -71,10 +83,10 @@ class ZmqVideoPublisher:
             self.stop()
             raise RuntimeError(f"ZMQ 发布端启动失败: {error}") from error
 
-        LOGGER.info(
-            "ZMQ video stream started: endpoint=%s camera=%s quality=%s",
+        logger.info(
+            "ZMQ video stream started: endpoint=%s device_sn=%s quality=%s",
             self.endpoint,
-            self.camera_id,
+            self.device_sn,
             self.jpeg_quality,
         )
 
@@ -83,7 +95,7 @@ class ZmqVideoPublisher:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             if self._thread.is_alive():
-                LOGGER.warning("ZMQ publisher did not stop within 2 seconds")
+                logger.warning("ZMQ publisher did not stop within 2 seconds")
             self._thread = None
 
     @property
@@ -103,7 +115,7 @@ class ZmqVideoPublisher:
         socket = None
         try:
             socket = context.socket(zmq.PUB)
-            socket.setsockopt(zmq.SNDHWM, 2)
+            socket.setsockopt(zmq.SNDHWM, self.send_hwm)
             socket.setsockopt(zmq.LINGER, 0)
             socket.bind(self.endpoint)
             self._startup_complete.set()
@@ -127,25 +139,26 @@ class ZmqVideoPublisher:
                     [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
                 )
                 if not success:
-                    LOGGER.warning(
-                        "JPEG encoding failed: camera=%s frame=%s",
-                        self.camera_id,
+                    logger.warning(
+                        "JPEG encoding failed: device_sn=%s frame=%s",
+                        self.device_sn,
                         frame_id,
                     )
                     continue
 
                 metadata = {
-                    "camera_id": self.camera_id,
+                    "protocol_version": PROTOCOL_VERSION,
+                    "device_sn": self.device_sn,
                     "frame_id": frame_id,
                     "timestamp": timestamp,
                     "width": frame.shape[1],
                     "height": frame.shape[0],
                     "channels": frame.shape[2],
-                    "encoding": "jpeg",
+                    "encoding": JPEG_ENCODING,
                 }
                 socket.send_multipart(
                     [
-                        self.camera_id.encode("utf-8"),
+                        self.device_sn.encode("utf-8"),
                         json.dumps(metadata, separators=(",", ":")).encode("utf-8"),
                         encoded.tobytes(),
                     ]
@@ -153,7 +166,7 @@ class ZmqVideoPublisher:
         except Exception as exc:
             self._running.clear()
             self._error = exc
-            LOGGER.exception("ZMQ publisher failed: endpoint=%s", self.endpoint)
+            logger.exception("ZMQ publisher failed: endpoint=%s", self.endpoint)
         finally:
             self._running.clear()
             self._startup_complete.set()
@@ -161,4 +174,4 @@ class ZmqVideoPublisher:
                 socket.close(linger=0)
             if self._owns_context:
                 context.term()
-            LOGGER.info("ZMQ video stream stopped: endpoint=%s", self.endpoint)
+            logger.info("ZMQ video stream stopped: endpoint=%s", self.endpoint)
