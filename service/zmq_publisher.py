@@ -1,102 +1,137 @@
-import cv2
+"""Low-latency JPEG-over-ZeroMQ video publisher."""
+
+from __future__ import annotations
+
 import json
-import time
+import logging
 import threading
+import time
+from typing import Optional
+
+import cv2
 import zmq
 
-import numpy as np
-import pyorbbecsdk as ob
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ZmqVideoPublisher:
+    """Publish each new camera frame as ``topic, metadata JSON, JPEG``."""
 
     def __init__(
         self,
         camera,
-        camera_id="CAM_01",
-        endpoint="tcp://0.0.0.0:5558",
-        jpeg_quality=85,
+        camera_id: str = "CAM_01",
+        endpoint: str = "tcp://0.0.0.0:5558",
+        jpeg_quality: int = 85,
+        context: Optional[zmq.Context] = None,
     ):
+        if not camera_id:
+            raise ValueError("camera_id 不能为空")
+        if not 1 <= jpeg_quality <= 100:
+            raise ValueError("jpeg_quality 必须在 1 到 100 之间")
+
         self.camera = camera
         self.camera_id = camera_id
-
         self.endpoint = endpoint
         self.jpeg_quality = jpeg_quality
+        self._context = context
+        self._owns_context = context is None
 
-        self._running = False
-        self._thread = None
+        self._running = threading.Event()
+        self._startup_complete = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._error: Optional[BaseException] = None
 
-    def start(self):
+    def start(self, startup_timeout: float = 5.0) -> None:
+        """Bind the endpoint and start publishing.
 
-        if self._running:
+        Binding happens in the worker because a ZeroMQ socket must only be used
+        by the thread that created it. This method still waits for the bind
+        result, so address/configuration failures are reported to the caller.
+        """
+        if self._running.is_set():
             return
 
-        self._running = True
-
+        self._error = None
+        self._startup_complete.clear()
+        self._running.set()
         self._thread = threading.Thread(
             target=self._publish_loop,
             daemon=True,
-            name="ZmqVideoPublisher",
+            name=f"ZmqVideoPublisher-{self.camera_id}",
         )
-
         self._thread.start()
 
-        print(
-            f"ZMQ video stream started: "
-            f"{self.endpoint}"
+        if not self._startup_complete.wait(startup_timeout):
+            self.stop()
+            raise TimeoutError(f"ZMQ 发布端在 {startup_timeout} 秒内未能启动")
+        if self._error is not None:
+            error = self._error
+            self.stop()
+            raise RuntimeError(f"ZMQ 发布端启动失败: {error}") from error
+
+        LOGGER.info(
+            "ZMQ video stream started: endpoint=%s camera=%s quality=%s",
+            self.endpoint,
+            self.camera_id,
+            self.jpeg_quality,
         )
 
-    def stop(self):
-
-        self._running = False
-
+    def stop(self) -> None:
+        self._running.clear()
         if self._thread is not None:
-            self._thread.join(timeout=2)
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                LOGGER.warning("ZMQ publisher did not stop within 2 seconds")
             self._thread = None
 
-    def _publish_loop(self):
+    @property
+    def is_running(self) -> bool:
+        return (
+            self._running.is_set()
+            and self._thread is not None
+            and self._thread.is_alive()
+        )
 
-        context = zmq.Context()
+    @property
+    def error(self) -> Optional[BaseException]:
+        return self._error
 
-        socket = context.socket(zmq.PUB)
-
-        # 实时视频不希望积压大量旧帧
-        socket.setsockopt(zmq.SNDHWM, 2)
-        socket.setsockopt(zmq.LINGER, 0)
-
-        socket.bind(self.endpoint)
-
-        last_frame_id = -1
-
+    def _publish_loop(self) -> None:
+        context = self._context or zmq.Context()
+        socket = None
         try:
+            socket = context.socket(zmq.PUB)
+            socket.setsockopt(zmq.SNDHWM, 2)
+            socket.setsockopt(zmq.LINGER, 0)
+            socket.bind(self.endpoint)
+            self._startup_complete.set()
 
-            while self._running:
-
+            last_frame_id = -1
+            while self._running.is_set():
                 packet = self.camera.get_frame_packet()
-
                 if packet is None:
                     time.sleep(0.005)
                     continue
 
                 frame_id, timestamp, frame = packet
-
-                # 防止同一帧重复发送
                 if frame_id == last_frame_id:
                     time.sleep(0.001)
                     continue
-
                 last_frame_id = frame_id
 
                 success, encoded = cv2.imencode(
                     ".jpg",
                     frame,
-                    [
-                        cv2.IMWRITE_JPEG_QUALITY,
-                        self.jpeg_quality,
-                    ],
+                    [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
                 )
-
                 if not success:
+                    LOGGER.warning(
+                        "JPEG encoding failed: camera=%s frame=%s",
+                        self.camera_id,
+                        frame_id,
+                    )
                     continue
 
                 metadata = {
@@ -108,286 +143,22 @@ class ZmqVideoPublisher:
                     "channels": frame.shape[2],
                     "encoding": "jpeg",
                 }
-
-                socket.send_multipart([
-                    self.camera_id.encode("utf-8"),
-                    json.dumps(metadata).encode("utf-8"),
-                    encoded.tobytes(),
-                ])
-
-        finally:
-
-            socket.close()
-            context.term()
-
-            print("ZMQ video stream stopped.")
-
-
-class OrbbecCamera:
-
-    def __init__(self, device_sn: str):
-        self.device_sn = device_sn
-
-        self.context = None
-        self.device = None
-        self.pipeline = None
-        self.config = None
-
-        self._running = False
-        self._thread = None
-
-        self._frame = None
-        self._frame_id = 0
-        self._timestamp = None
-
-        self._frame_lock = threading.Lock()
-
-        self._init_camera()
-
-    def _init_camera(self):
-        self.context = ob.Context()
-        device_list = self.context.query_devices()
-
-        available_sn = [
-            device_list.get_device_serial_number_by_index(i)
-            for i in range(device_list.get_count())
-        ]
-
-        if self.device_sn not in available_sn:
-            raise RuntimeError(
-                f"没有找到相机 {self.device_sn}，"
-                f"当前设备: {available_sn}"
-            )
-
-        self.device = (
-            device_list.get_device_by_serial_number(
-                self.device_sn
-            )
-        )
-
-        info = self.device.get_device_info()
-
-        print("名称:", info.get_name())
-        print("序列号:", info.get_serial_number())
-        print("固件版本:", info.get_firmware_version())
-        print("连接类型:", info.get_connection_type())
-
-        self.pipeline = ob.Pipeline(self.device)
-        self.config = ob.Config()
-
-        color_profiles = (
-            self.pipeline.get_stream_profile_list(
-                ob.OBSensorType.COLOR_SENSOR
-            )
-        )
-
-        color_profile = (
-            color_profiles.get_default_video_stream_profile()
-        )
-
-        print(
-            "Color Stream:",
-            f"{color_profile.get_width()}x"
-            f"{color_profile.get_height()}",
-            f"@{color_profile.get_fps()}FPS",
-            f"format={color_profile.get_format()}",
-        )
-
-        self.config.enable_stream(color_profile)
-
-    # ---------------------------------------------------------
-    # lifecycle
-    # ---------------------------------------------------------
-
-    def start(self):
-        if self._running:
-            return
-
-        self.pipeline.start(self.config)
-
-        self._running = True
-
-        self._thread = threading.Thread(
-            target=self._capture_loop,
-            daemon=True,
-            name=f"Orbbec-{self.device_sn}",
-        )
-
-        self._thread.start()
-
-        print(f"Camera {self.device_sn} started.")
-
-    def stop(self):
-        if not self._running:
-            return
-
-        self._running = False
-
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-            self._thread = None
-
-        self.pipeline.stop()
-
-        print(f"Camera {self.device_sn} stopped.")
-
-    # ---------------------------------------------------------
-    # capture
-    # ---------------------------------------------------------
-
-    def _capture_loop(self):
-
-        while self._running:
-
-            try:
-                frames = self.pipeline.wait_for_frames(1000)
-
-                if frames is None:
-                    continue
-
-                color_frame = frames.get_color_frame()
-
-                if color_frame is None:
-                    continue
-
-                image = self._color_frame_to_bgr(
-                    color_frame
+                socket.send_multipart(
+                    [
+                        self.camera_id.encode("utf-8"),
+                        json.dumps(metadata, separators=(",", ":")).encode("utf-8"),
+                        encoded.tobytes(),
+                    ]
                 )
-
-                if image is None:
-                    continue
-
-                timestamp = time.time()
-
-                with self._frame_lock:
-                    self._frame = image
-                    self._frame_id += 1
-                    self._timestamp = timestamp
-
-            except Exception as e:
-                if self._running:
-                    print(f"Camera capture error: {e}")
-
-    # ---------------------------------------------------------
-    # public interface
-    # ---------------------------------------------------------
-
-    def get_frame(self):
-        """
-        外部最简单的接口。
-
-        Returns:
-            np.ndarray | None
-        """
-        with self._frame_lock:
-            return self._frame
-
-    def get_frame_packet(self):
-        """
-        给 ZMQ 服务使用。
-
-        Returns:
-            (frame_id, timestamp, frame) | None
-        """
-        with self._frame_lock:
-
-            if self._frame is None:
-                return None
-
-            return (
-                self._frame_id,
-                self._timestamp,
-                self._frame,
-            )
-
-    @property
-    def is_running(self):
-        return self._running
-
-    # ---------------------------------------------------------
-    # convert
-    # ---------------------------------------------------------
-
-    @staticmethod
-    def _color_frame_to_bgr(frame):
-
-        width = frame.get_width()
-        height = frame.get_height()
-        fmt = frame.get_format()
-
-        data = np.frombuffer(
-            frame.get_data(),
-            dtype=np.uint8,
-        )
-
-        if fmt == ob.OBFormat.MJPG:
-            return cv2.imdecode(
-                data,
-                cv2.IMREAD_COLOR,
-            )
-
-        if fmt == ob.OBFormat.RGB:
-
-            image = data.reshape(
-                (height, width, 3)
-            )
-
-            return cv2.cvtColor(
-                image,
-                cv2.COLOR_RGB2BGR,
-            )
-
-        if fmt == ob.OBFormat.BGR:
-            return data.reshape(
-                (height, width, 3)
-            )
-
-        if fmt == ob.OBFormat.YUYV:
-
-            image = data.reshape(
-                (height, width, 2)
-            )
-
-            return cv2.cvtColor(
-                image,
-                cv2.COLOR_YUV2BGR_YUY2,
-            )
-
-        raise RuntimeError(
-            f"暂不支持的彩色格式: {fmt}"
-        )
-
-
-if __name__ == "__main__":
-
-
-    DEVICE_SN = "CPC7B5300098"
-    CAMERA_ID = "CAM_01"
-
-    camera = OrbbecCamera(
-        device_sn=DEVICE_SN
-    )
-
-    publisher = ZmqVideoPublisher(
-        camera=camera,
-        camera_id=CAMERA_ID,
-        endpoint="tcp://0.0.0.0:5558",
-        jpeg_quality=85,
-    )
-
-    camera.start()
-    publisher.start()
-
-    try:
-
-        while True:
-            time.sleep(1)
-
-    except KeyboardInterrupt:
-        print("Stopping...")
-
-    finally:
-
-        publisher.stop()
-        camera.stop()
-
+        except Exception as exc:
+            self._running.clear()
+            self._error = exc
+            LOGGER.exception("ZMQ publisher failed: endpoint=%s", self.endpoint)
+        finally:
+            self._running.clear()
+            self._startup_complete.set()
+            if socket is not None:
+                socket.close(linger=0)
+            if self._owns_context:
+                context.term()
+            LOGGER.info("ZMQ video stream stopped: endpoint=%s", self.endpoint)

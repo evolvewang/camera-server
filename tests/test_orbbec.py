@@ -105,7 +105,7 @@ def get_stream(device_sn):
 
     pipeline.start(config)
 
-    save_dir = "E:/projects/camera-server/data/camera_data"
+    save_dir = "/data/camera_data"
 
     SAVE_FPS = 5
     SAVE_DURATION = 10  # 秒
