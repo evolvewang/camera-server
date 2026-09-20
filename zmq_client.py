@@ -189,8 +189,8 @@ def main(
 
 
 if __name__ == "__main__":
-    device_sn = "CPC7B530001A"
-    endpoint = "tcp://127.0.0.1:5558"
+    device_sn = "AY6V16300W8"
+    endpoint = "tcp://10.20.2.49:5558"
     receive_timeout_ms = 5000
     receive_hwm = 2
     show = True
