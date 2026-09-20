@@ -57,6 +57,7 @@ class OrbbecCamera:
         self.device = None
         self.pipeline = None
         self.config = None
+        self._align_filter = None
         self._running = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._pipeline_started = False
@@ -102,12 +103,17 @@ class OrbbecCamera:
             )
             self.config.enable_stream(depth_profile)
             self._configure_depth()
-        align_modes = {
-            "DISABLE": ob.OBAlignMode.DISABLE,
-            "HW_D2C": ob.OBAlignMode.HW_MODE,
-            "SW_D2C": ob.OBAlignMode.SW_MODE,
-        }
-        self.config.set_align_mode(align_modes[self.align_mode])
+        if self.align_mode == "DISABLE":
+            self.config.set_align_mode(ob.OBAlignMode.DISABLE)
+        elif self.align_mode == "HW_D2C":
+            self.config.set_align_mode(ob.OBAlignMode.HW_MODE)
+        else:
+            # SW_D2C is performed on each FrameSet by AlignFilter. Setting
+            # Config to SW_MODE alone does not transform get_depth_frame().
+            self._align_filter = ob.AlignFilter(
+                align_to_stream=ob.OBStreamType.COLOR_STREAM
+            )
+            logger.info("Software D2C alignment target: color stream")
 
     def _profile_options(self, stream_type: str):
         options = self.stream_config[stream_type]
@@ -303,6 +309,10 @@ class OrbbecCamera:
                 frames = self.pipeline.wait_for_frames(1000)
                 if frames is None:
                     continue
+                if self._align_filter is not None:
+                    frames = self._align_filter.process(frames)
+                    if frames is None:
+                        continue
                 timestamp = time.time()
                 if "color" in self.stream_types:
                     color_frame = frames.get_color_frame()
