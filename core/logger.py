@@ -5,10 +5,10 @@ from pathlib import Path
 from core.config import app_config
 
 LOG_DIR = Path(app_config['project']['directory']) / "log"
-LOG_FILENAME = app_config["logging"]["filename"]
+LOG_FILENAME = app_config["project"]["name"] + ".log"
 LOG_LEVEL = getattr(logging, app_config["logging"]["level"].upper())
 
-MAX_BACKUP_COUNT = app_config["logging"]["backup_count"]  # 备份文件数量上限
+BACKUP_COUNT = app_config["logging"]["backup_count"]  # 备份文件数量上限
 LOG_FORMAT = "[%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -74,7 +74,7 @@ def init_logging() -> logging.Logger:
         filename=LOG_DIR / LOG_FILENAME,
         when="midnight",
         interval=1,
-        backupCount=MAX_BACKUP_COUNT,
+        backupCount=BACKUP_COUNT,
         encoding="utf-8"
     )
     file_handler.setFormatter(base_formatter)
@@ -89,3 +89,11 @@ def get_logger(name):
     if not _INITIALIZED:
         init_logging()
     return logging.getLogger(name)
+
+
+if __name__ == '__main__':
+    logger = get_logger(__name__)
+    logger.debug('debug')
+    logger.info('info')
+    logger.warning('warning')
+    logger.error('error')

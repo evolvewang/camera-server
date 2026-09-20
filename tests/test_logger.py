@@ -7,7 +7,7 @@ from core.logger import (
     Color,
     LOG_DIR,
     LOG_LEVEL,
-    MAX_BACKUP_COUNT,
+    BACKUP_COUNT,
     get_logger,
 )
 
@@ -20,7 +20,7 @@ class LoggerConfigTest(unittest.TestCase):
             getattr(logging, app_config["logging"]["level"].upper()),
         )
         self.assertEqual(
-            MAX_BACKUP_COUNT,
+            BACKUP_COUNT,
             app_config["logging"]["backup_count"],
         )
 

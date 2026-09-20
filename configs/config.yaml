@@ -9,11 +9,11 @@ logging:
   filename: "camera-server.log"
   # 日志等级: DEBUG INFO WARNING ERROR CRITICAL
   level: "INFO"
-  # 日志留存天数
+  # 备份文件数量
   backup_count: 30
 
 camera:
-  device_sn: "AY6966300HW"
+  device_sn: "CPC7B530001A"
 
 stream:
   jpeg_quality: 85
