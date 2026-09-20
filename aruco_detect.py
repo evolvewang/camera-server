@@ -1,7 +1,5 @@
-"""Client API and runnable example for color and depth streams."""
+"""ArUco detection helpers built on the shared video subscriber."""
 
-import json
-import math
 from functools import lru_cache
 from typing import Optional
 
@@ -10,11 +8,7 @@ import numpy as np
 import zmq
 
 from core.logger import get_logger
-from service.video_protocol import (
-    DEPTH_ENCODING,
-    JPEG_ENCODING,
-    PROTOCOL_VERSION,
-)
+from zmq_client import ZmqVideoSubscriber as _ZmqVideoSubscriber
 
 
 logger = get_logger(__name__)
@@ -64,7 +58,6 @@ def _detect_aruco_markers(
 ) -> tuple[list[np.ndarray], list[int]]:
     """Return detected marker corners and IDs in OpenCV detection order."""
     gray = _to_aruco_gray(frame)
-
     detector_type, detector = _get_aruco_detector(dictionary_name)
     if detector_type == "modern":
         corners, ids, _ = detector.detectMarkers(gray)
@@ -92,12 +85,7 @@ def detect_aruco_centers(
     frame: np.ndarray,
     dictionary_name: str = "DICT_4X4_50",
 ) -> list[tuple[int, int]]:
-    """Detect ArUco markers and return their pixel centers as ``(x, y)``.
-
-    ``x`` is the column and ``y`` is the row. Color frames are expected to be
-    OpenCV BGR images. The returned list follows OpenCV's marker detection
-    order and is empty when no marker is found.
-    """
+    """Detect ArUco markers and return their pixel centers as ``(x, y)``."""
     corners, _ = _detect_aruco_markers(frame, dictionary_name)
     return _centers_from_corners(corners)
 
@@ -125,11 +113,10 @@ def draw_aruco_annotations(
         )
         marker_id = marker_ids[index] if index < len(marker_ids) else "?"
         label = f"ID:{marker_id} center=({center_x},{center_y})"
-        label_y = max(20, center_y - 12)
         cv2.putText(
             annotated,
             label,
-            (center_x + 12, label_y),
+            (center_x + 12, max(20, center_y - 12)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             (0, 0, 255),
@@ -139,8 +126,8 @@ def draw_aruco_annotations(
     return annotated
 
 
-class ZmqVideoSubscriber:
-    """Receive color as BGR uint8 and depth as raw uint16 arrays."""
+class ZmqVideoSubscriber(_ZmqVideoSubscriber):
+    """Shared video subscriber with optional ArUco detection on color frames."""
 
     def __init__(
         self,
@@ -149,142 +136,32 @@ class ZmqVideoSubscriber:
         receive_timeout_ms: Optional[int],
         receive_hwm: int,
         context: Optional[zmq.Context] = None,
-    ):
-        if not isinstance(device_sn, str) or not device_sn.strip():
-            raise ValueError("device_sn 不能为空")
-        if not isinstance(endpoint, str) or not endpoint:
-            raise ValueError("endpoint 不能为空")
-        if (
-            receive_timeout_ms is not None
-            and (
-                isinstance(receive_timeout_ms, bool)
-                or not isinstance(receive_timeout_ms, int)
-                or receive_timeout_ms <= 0
-            )
-        ):
-            raise ValueError("receive_timeout_ms 必须是正整数或 None")
-        if (
-            isinstance(receive_hwm, bool)
-            or not isinstance(receive_hwm, int)
-            or receive_hwm <= 0
-        ):
-            raise ValueError("receive_hwm 必须是正整数")
-
-        self.endpoint = endpoint
-        self.device_sn = device_sn.strip()
-        self._context = context or zmq.Context()
-        self._owns_context = context is None
-        self._closed = False
-        self.stream_shapes: dict[str, tuple[int, ...]] = {}
+    ) -> None:
+        super().__init__(
+            device_sn=device_sn,
+            endpoint=endpoint,
+            receive_timeout_ms=receive_timeout_ms,
+            receive_hwm=receive_hwm,
+            context=context,
+        )
         self.last_aruco_corners: list[np.ndarray] = []
         self.last_aruco_ids: list[int] = []
-        self.socket = self._context.socket(zmq.SUB)
-        self.socket.setsockopt(zmq.RCVHWM, receive_hwm)
-        self.socket.setsockopt(zmq.LINGER, 0)
-        if receive_timeout_ms is not None:
-            self.socket.setsockopt(zmq.RCVTIMEO, receive_timeout_ms)
-        self.socket.setsockopt_string(zmq.SUBSCRIBE, self.device_sn)
-        self.socket.connect(self.endpoint)
-        logger.info(
-            "Connected to ZMQ video stream: endpoint=%s device_sn=%s",
-            self.endpoint,
-            self.device_sn,
-        )
-
-    def receive(self):
-        """Return ``(metadata, frame)`` or raise ``TimeoutError``."""
-        try:
-            parts = self.socket.recv_multipart()
-        except zmq.Again as exc:
-            raise TimeoutError(
-                f"等待相机 {self.device_sn} 视频帧超时: {self.endpoint}"
-            ) from exc
-
-        if len(parts) != 3:
-            raise ValueError(f"无效视频消息：期望 3 段，实际 {len(parts)} 段")
-        topic, metadata_bytes, image_bytes = parts
-        topic_text = topic.decode("utf-8")
-        if topic_text != self.device_sn:
-            raise ValueError(f"收到非目标相机 topic: {topic_text}")
-
-        metadata = json.loads(metadata_bytes.decode("utf-8"))
-        if metadata.get("protocol_version") != PROTOCOL_VERSION:
-            raise ValueError(
-                f"不支持的协议版本: {metadata.get('protocol_version')}"
-            )
-        if metadata.get("device_sn") != topic_text:
-            raise ValueError("消息 topic 与 metadata.device_sn 不一致")
-        stream_type = metadata.get("stream_type")
-        encoding = metadata.get("encoding")
-        expected_encoding = {
-            "color": JPEG_ENCODING,
-            "depth": DEPTH_ENCODING,
-        }.get(stream_type)
-        if encoding != expected_encoding or expected_encoding is None:
-            raise ValueError(
-                f"不支持的视频流或编码: {stream_type}/{encoding}"
-            )
-        image_array = np.frombuffer(image_bytes, dtype=np.uint8)
-        decode_mode = (
-            cv2.IMREAD_COLOR
-            if stream_type == "color" else cv2.IMREAD_UNCHANGED
-        )
-        frame = cv2.imdecode(image_array, decode_mode)
-        if frame is None:
-            raise ValueError(f"{stream_type} 视频帧解码失败")
-        expected_channels = 3 if stream_type == "color" else 1
-        if (
-            frame.shape[:2] != (metadata.get("height"), metadata.get("width"))
-            or metadata.get("channels") != expected_channels
-        ):
-            raise ValueError("图像尺寸或通道数与元数据不一致")
-        if stream_type == "depth":
-            if frame.dtype != np.uint16 or frame.ndim != 2:
-                raise ValueError("深度图必须为单通道 uint16")
-            depth_scale = metadata.get("depth_scale")
-            if (
-                isinstance(depth_scale, bool)
-                or not isinstance(depth_scale, (int, float))
-                or not math.isfinite(depth_scale)
-                or depth_scale <= 0
-            ):
-                raise ValueError("无效 depth_scale")
-        self.stream_shapes[stream_type] = tuple(int(size) for size in frame.shape)
-        return metadata, frame
 
     def receive_with_aruco(
         self,
         dictionary_name: str = "DICT_4X4_50",
     ) -> tuple[dict, np.ndarray, list[tuple[int, int]]]:
-        """Receive one frame and detect centers on color frames.
-
-        Depth frames return an empty center list. ``stream_shapes`` always
-        contains the latest shape seen for each stream type.
-        """
+        """Receive one frame and detect centers on color frames."""
         metadata, frame = self.receive()
         if metadata["stream_type"] != "color":
             self.last_aruco_corners = []
             self.last_aruco_ids = []
             return metadata, frame, []
+
         corners, marker_ids = _detect_aruco_markers(frame, dictionary_name)
         self.last_aruco_corners = corners
         self.last_aruco_ids = marker_ids
-        centers = _centers_from_corners(corners)
-        return metadata, frame, centers
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self.socket.close(linger=0)
-        if self._owns_context:
-            self._context.term()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
+        return metadata, frame, _centers_from_corners(corners)
 
 
 def main(
@@ -307,18 +184,17 @@ def main(
             receive_hwm=receive_hwm,
         ) as subscriber:
             while True:
-                metadata, frame, aruco_centers = subscriber.receive_with_aruco(
+                metadata, frame, centers = subscriber.receive_with_aruco(
                     aruco_dictionary_name
                 )
                 stream_type = metadata["stream_type"]
-                rows, columns = frame.shape[:2]
                 logger.info(
                     "stream=%s frame_id=%s shape=%s rows=%d columns=%d",
                     stream_type,
                     metadata["frame_id"],
                     frame.shape,
-                    rows,
-                    columns,
+                    frame.shape[0],
+                    frame.shape[1],
                 )
                 if len(subscriber.stream_shapes) > 1:
                     logger.info(
@@ -327,21 +203,24 @@ def main(
                         subscriber.stream_shapes.get("depth"),
                     )
                 if stream_type == "color":
-                    logger.info("aruco_centers=%s", aruco_centers)
+                    logger.info("aruco_centers=%s", centers)
                 if show:
                     if stream_type == "depth":
-                        # Only the preview is colorized; receive() returns raw uint16.
-                        depth_mm = frame.astype(np.float32) * metadata["depth_scale"]
-                        preview = cv2.convertScaleAbs(depth_mm, alpha=255.0 / 4000)
+                        depth_mm = (
+                            frame.astype(np.float32) * metadata["depth_scale"]
+                        )
+                        preview = cv2.convertScaleAbs(
+                            depth_mm, alpha=255.0 / 4000
+                        )
                         preview = cv2.applyColorMap(preview, cv2.COLORMAP_JET)
                     else:
                         preview = draw_aruco_annotations(
                             frame,
                             subscriber.last_aruco_corners,
                             subscriber.last_aruco_ids,
-                            aruco_centers,
+                            centers,
                         )
-                    cv2.imshow(f"{device_sn}/{metadata['stream_type']}", preview)
+                    cv2.imshow(f"{device_sn}/{stream_type}", preview)
                     if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                         break
     except KeyboardInterrupt:
@@ -355,17 +234,19 @@ def main(
 
 
 if __name__ == "__main__":
-    device_sn = "AY68B5200AF"
-    endpoint = "tcp://10.20.2.49:5558"
+    device_sn = ""
+    endpoint = "tcp://127.0.0.1:5558"
     receive_timeout_ms = 5000
     receive_hwm = 2
     show = True
     aruco_dictionary_name = "DICT_4X4_50"
-    main(
-        device_sn,
-        endpoint,
-        receive_timeout_ms,
-        receive_hwm,
-        show,
-        aruco_dictionary_name,
+    raise SystemExit(
+        main(
+            device_sn,
+            endpoint,
+            receive_timeout_ms,
+            receive_hwm,
+            show,
+            aruco_dictionary_name,
+        )
     )

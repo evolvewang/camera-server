@@ -4,7 +4,7 @@ import json
 import math
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import numpy as np
@@ -26,7 +26,7 @@ class ZmqVideoPublisher:
 
     def __init__(
         self,
-        camera,
+        camera: Any,
         endpoint: str,
         jpeg_quality: int,
         send_hwm: int,
@@ -73,6 +73,8 @@ class ZmqVideoPublisher:
         by the thread that created it. This method still waits for the bind
         result, so address/configuration failures are reported to the caller.
         """
+        if not isinstance(startup_timeout, (int, float)) or startup_timeout <= 0:
+            raise ValueError("startup_timeout 必须是正数")
         if self._running.is_set():
             return
 
@@ -122,7 +124,7 @@ class ZmqVideoPublisher:
         return self._error
 
     def _publish_loop(self) -> None:
-        context = self._context or zmq.Context()
+        context = self._context if self._context is not None else zmq.Context()
         socket = None
         try:
             socket = context.socket(zmq.PUB)

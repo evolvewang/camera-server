@@ -17,7 +17,7 @@ camera:
 
 stream:
   # color / depth / depth_and_color
-  type: "color"
+  type: "depth_and_color"
   # DISABLE / HW_D2C / SW_D2C；仅双流时可开启对齐
   align_mode: "DISABLE"
   color:

@@ -2,6 +2,7 @@
 
 import signal
 import threading
+from typing import Optional
 
 from camera.orbbec_camera import OrbbecCamera, discover_device_serial_numbers
 from core.config import app_config
@@ -12,7 +13,7 @@ from service.zmq_publisher import ZmqVideoPublisher
 logger = get_logger(__name__)
 
 
-def resolve_device_sn(requested_sn):
+def resolve_device_sn(requested_sn: Optional[str]) -> str:
     if requested_sn:
         return requested_sn
 
@@ -37,7 +38,7 @@ class ZmqVideoServer:
         self.publisher = None
         self.stop_requested = threading.Event()
 
-    def start(self):
+    def start(self) -> int:
         self._register_signal_handlers()
 
         try:
@@ -76,7 +77,7 @@ class ZmqVideoServer:
             self.stop()
         return 0
 
-    def stop(self):
+    def stop(self) -> None:
         self.stop_requested.set()
         if self.publisher is not None:
             self.publisher.stop()
@@ -84,8 +85,8 @@ class ZmqVideoServer:
             self.camera.stop()
         logger.info("Camera Server stopped")
 
-    def _register_signal_handlers(self):
-        def request_stop(signum, frame):
+    def _register_signal_handlers(self) -> None:
+        def request_stop(signum: int, frame) -> None:
             logger.info("Stop requested by signal %s", signum)
             self.stop_requested.set()
 
