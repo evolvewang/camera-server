@@ -6,30 +6,34 @@ import uuid
 import numpy as np
 import zmq
 
+from camera.orbbec_camera import FramePacket
 from zmq_client import ZmqVideoSubscriber
 from service.zmq_publisher import ZmqVideoPublisher
 
 
 class FakeCamera:
-    def __init__(self, device_sn="TEST_SN"):
+    def __init__(self, device_sn="TEST_SN", stream_types=("color", "depth")):
         self.device_sn = device_sn
+        self.stream_types = stream_types
         self._lock = threading.Lock()
-        self._packet = None
+        self._packets = {name: None for name in stream_types}
         self._error = None
 
-    def set_frame(self, frame_id, timestamp, frame):
+    def set_frame(self, stream_type, frame_id, timestamp, frame, depth_scale=None):
         with self._lock:
-            self._packet = (frame_id, timestamp, frame)
+            self._packets[stream_type] = FramePacket(
+                frame_id, timestamp, frame, depth_scale
+            )
 
     def set_error(self, error):
         with self._lock:
             self._error = error
 
-    def get_frame_packet(self):
+    def get_frame_packet(self, stream_type):
         with self._lock:
             if self._error is not None:
                 raise self._error
-            return self._packet
+            return self._packets[stream_type]
 
 
 class ZmqStreamTest(unittest.TestCase):
@@ -62,12 +66,13 @@ class ZmqStreamTest(unittest.TestCase):
             # Allow the SUB subscription to reach the PUB before publishing.
             time.sleep(0.05)
             frame = np.full((24, 32, 3), (10, 80, 160), dtype=np.uint8)
-            self.camera.set_frame(7, 1234.5, frame)
+            self.camera.set_frame("color", 7, 1234.5, frame)
 
             metadata, decoded = subscriber.receive()
 
-            self.assertEqual(metadata["protocol_version"], 1)
+            self.assertEqual(metadata["protocol_version"], 2)
             self.assertEqual(metadata["device_sn"], "TEST_SN")
+            self.assertEqual(metadata["stream_type"], "color")
             self.assertEqual(metadata["frame_id"], 7)
             self.assertEqual(metadata["timestamp"], 1234.5)
             self.assertEqual(metadata["width"], 32)
@@ -75,6 +80,49 @@ class ZmqStreamTest(unittest.TestCase):
             self.assertEqual(metadata["channels"], 3)
             self.assertEqual(metadata["encoding"], "jpeg")
             self.assertEqual(decoded.shape, frame.shape)
+        finally:
+            subscriber.close()
+
+    def test_publishes_lossless_depth_with_scale(self):
+        subscriber = ZmqVideoSubscriber(
+            device_sn="TEST_SN",
+            endpoint=self.endpoint,
+            receive_timeout_ms=1000,
+            receive_hwm=2,
+            context=self.context,
+        )
+        try:
+            time.sleep(0.05)
+            depth = np.array([[0, 1234], [4500, 65535]], dtype=np.uint16)
+            self.camera.set_frame("depth", 3, 1234.6, depth, 0.1)
+            metadata, decoded = subscriber.receive()
+            self.assertEqual(metadata["stream_type"], "depth")
+            self.assertEqual(metadata["encoding"], "png16")
+            self.assertEqual(metadata["channels"], 1)
+            self.assertEqual(metadata["depth_scale"], 0.1)
+            self.assertEqual(decoded.dtype, np.uint16)
+            np.testing.assert_array_equal(decoded, depth)
+        finally:
+            subscriber.close()
+
+    def test_publishes_both_streams_with_same_sn_topic(self):
+        subscriber = ZmqVideoSubscriber(
+            device_sn="TEST_SN",
+            endpoint=self.endpoint,
+            receive_timeout_ms=1000,
+            receive_hwm=2,
+            context=self.context,
+        )
+        try:
+            time.sleep(0.05)
+            self.camera.set_frame(
+                "color", 1, 10.0, np.zeros((8, 8, 3), dtype=np.uint8)
+            )
+            self.camera.set_frame(
+                "depth", 1, 10.0, np.ones((8, 8), dtype=np.uint16), 1.0
+            )
+            received = [subscriber.receive()[0]["stream_type"] for _ in range(2)]
+            self.assertEqual(set(received), {"color", "depth"})
         finally:
             subscriber.close()
 
@@ -104,6 +152,16 @@ class ZmqStreamTest(unittest.TestCase):
             time.sleep(0.01)
 
         self.assertIsInstance(self.publisher.error, RuntimeError)
+        self.assertFalse(self.publisher.is_running)
+
+    def test_invalid_depth_scale_stops_publisher(self):
+        self.camera.set_frame(
+            "depth", 1, 10.0, np.ones((2, 2), dtype=np.uint16), 0
+        )
+        deadline = time.monotonic() + 1.0
+        while self.publisher.error is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsInstance(self.publisher.error, ValueError)
         self.assertFalse(self.publisher.is_running)
 
 

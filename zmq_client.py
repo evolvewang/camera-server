@@ -1,6 +1,7 @@
-"""Client API and runnable example for the camera RGB stream."""
+"""Client API and runnable example for color and depth streams."""
 
 import json
+import math
 from typing import Optional
 
 import cv2
@@ -8,14 +9,18 @@ import numpy as np
 import zmq
 
 from core.logger import get_logger
-from service.video_protocol import JPEG_ENCODING, PROTOCOL_VERSION
+from service.video_protocol import (
+    DEPTH_ENCODING,
+    JPEG_ENCODING,
+    PROTOCOL_VERSION,
+)
 
 
 logger = get_logger(__name__)
 
 
 class ZmqVideoSubscriber:
-    """Receive JPEG frames and decode them to OpenCV BGR arrays."""
+    """Receive color as BGR uint8 and depth as raw uint16 arrays."""
 
     def __init__(
         self,
@@ -64,7 +69,7 @@ class ZmqVideoSubscriber:
         )
 
     def receive(self):
-        """Return ``(metadata, BGR frame)`` or raise ``TimeoutError``."""
+        """Return ``(metadata, frame)`` or raise ``TimeoutError``."""
         try:
             parts = self.socket.recv_multipart()
         except zmq.Again as exc:
@@ -86,13 +91,41 @@ class ZmqVideoSubscriber:
             )
         if metadata.get("device_sn") != topic_text:
             raise ValueError("消息 topic 与 metadata.device_sn 不一致")
-        if metadata.get("encoding") != JPEG_ENCODING:
-            raise ValueError(f"不支持的图像编码: {metadata.get('encoding')}")
-
+        stream_type = metadata.get("stream_type")
+        encoding = metadata.get("encoding")
+        expected_encoding = {
+            "color": JPEG_ENCODING,
+            "depth": DEPTH_ENCODING,
+        }.get(stream_type)
+        if encoding != expected_encoding or expected_encoding is None:
+            raise ValueError(
+                f"不支持的视频流或编码: {stream_type}/{encoding}"
+            )
         image_array = np.frombuffer(image_bytes, dtype=np.uint8)
-        frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+        decode_mode = (
+            cv2.IMREAD_COLOR
+            if stream_type == "color" else cv2.IMREAD_UNCHANGED
+        )
+        frame = cv2.imdecode(image_array, decode_mode)
         if frame is None:
-            raise ValueError("JPEG 视频帧解码失败")
+            raise ValueError(f"{stream_type} 视频帧解码失败")
+        expected_channels = 3 if stream_type == "color" else 1
+        if (
+            frame.shape[:2] != (metadata.get("height"), metadata.get("width"))
+            or metadata.get("channels") != expected_channels
+        ):
+            raise ValueError("图像尺寸或通道数与元数据不一致")
+        if stream_type == "depth":
+            if frame.dtype != np.uint16 or frame.ndim != 2:
+                raise ValueError("深度图必须为单通道 uint16")
+            depth_scale = metadata.get("depth_scale")
+            if (
+                isinstance(depth_scale, bool)
+                or not isinstance(depth_scale, (int, float))
+                or not math.isfinite(depth_scale)
+                or depth_scale <= 0
+            ):
+                raise ValueError("无效 depth_scale")
         return metadata, frame
 
     def close(self) -> None:
@@ -131,11 +164,18 @@ def main(
             while True:
                 metadata, frame = subscriber.receive()
                 logger.debug(
-                    f"frame_id={metadata['frame_id']} "
+                    f"stream={metadata['stream_type']} frame_id={metadata['frame_id']} "
                     f"timestamp={metadata['timestamp']:.6f} shape={frame.shape}"
                 )
                 if show:
-                    cv2.imshow(device_sn, frame)
+                    if metadata["stream_type"] == "depth":
+                        # Only the preview is colorized; receive() returns raw uint16.
+                        depth_mm = frame.astype(np.float32) * metadata["depth_scale"]
+                        preview = cv2.convertScaleAbs(depth_mm, alpha=255.0 / 4000)
+                        preview = cv2.applyColorMap(preview, cv2.COLORMAP_JET)
+                    else:
+                        preview = frame
+                    cv2.imshow(f"{device_sn}/{metadata['stream_type']}", preview)
                     if cv2.waitKey(1) & 0xFF in (27, ord("q")):
                         break
     except KeyboardInterrupt:

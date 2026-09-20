@@ -1,22 +1,28 @@
-"""Low-latency JPEG-over-ZeroMQ video publisher."""
+"""Low-latency color JPEG and lossless depth PNG-over-ZeroMQ publisher."""
 
 import json
+import math
 import threading
 import time
 from typing import Optional
 
 import cv2
+import numpy as np
 import zmq
 
 from core.logger import get_logger
-from service.video_protocol import JPEG_ENCODING, PROTOCOL_VERSION
+from service.video_protocol import (
+    DEPTH_ENCODING,
+    JPEG_ENCODING,
+    PROTOCOL_VERSION,
+)
 
 
 logger = get_logger(__name__)
 
 
 class ZmqVideoPublisher:
-    """Publish each new camera frame as ``topic, metadata JSON, JPEG``."""
+    """Publish each new frame as ``SN topic, metadata JSON, image bytes``."""
 
     def __init__(
         self,
@@ -44,6 +50,11 @@ class ZmqVideoPublisher:
 
         self.camera = camera
         self.device_sn = device_sn
+        self.stream_types = tuple(camera.stream_types)
+        if not self.stream_types or any(
+            name not in ("color", "depth") for name in self.stream_types
+        ):
+            raise ValueError("camera.stream_types 必须包含 color 或 depth")
         self.endpoint = endpoint
         self.jpeg_quality = jpeg_quality
         self.send_hwm = send_hwm
@@ -120,49 +131,67 @@ class ZmqVideoPublisher:
             socket.bind(self.endpoint)
             self._startup_complete.set()
 
-            last_frame_id = -1
+            last_frame_ids = {name: -1 for name in self.stream_types}
             while self._running.is_set():
-                packet = self.camera.get_frame_packet()
-                if packet is None:
-                    time.sleep(0.005)
-                    continue
-
-                frame_id, timestamp, frame = packet
-                if frame_id == last_frame_id:
-                    time.sleep(0.001)
-                    continue
-                last_frame_id = frame_id
-
-                success, encoded = cv2.imencode(
-                    ".jpg",
-                    frame,
-                    [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
-                )
-                if not success:
-                    logger.warning(
-                        "JPEG encoding failed: device_sn=%s frame=%s",
-                        self.device_sn,
-                        frame_id,
-                    )
-                    continue
-
-                metadata = {
-                    "protocol_version": PROTOCOL_VERSION,
-                    "device_sn": self.device_sn,
-                    "frame_id": frame_id,
-                    "timestamp": timestamp,
-                    "width": frame.shape[1],
-                    "height": frame.shape[0],
-                    "channels": frame.shape[2],
-                    "encoding": JPEG_ENCODING,
-                }
-                socket.send_multipart(
-                    [
+                sent = False
+                for stream_type in self.stream_types:
+                    packet = self.camera.get_frame_packet(stream_type)
+                    if packet is None or packet.frame_id == last_frame_ids[stream_type]:
+                        continue
+                    last_frame_ids[stream_type] = packet.frame_id
+                    if stream_type == "color":
+                        if (
+                            packet.frame.dtype != np.uint8
+                            or packet.frame.ndim != 3
+                            or packet.frame.shape[2] != 3
+                        ):
+                            raise ValueError("color 帧必须为三通道 uint8 BGR")
+                        success, encoded = cv2.imencode(
+                            ".jpg", packet.frame,
+                            [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality],
+                        )
+                        encoding = JPEG_ENCODING
+                        channels = 3
+                    else:
+                        if packet.frame.dtype != np.uint16 or packet.frame.ndim != 2:
+                            raise ValueError("depth 帧必须为单通道 uint16")
+                        if (
+                            isinstance(packet.depth_scale, bool)
+                            or not isinstance(packet.depth_scale, (int, float))
+                            or not math.isfinite(packet.depth_scale)
+                            or packet.depth_scale <= 0
+                        ):
+                            raise ValueError("depth_scale 必须为正的有限数")
+                        success, encoded = cv2.imencode(".png", packet.frame)
+                        encoding = DEPTH_ENCODING
+                        channels = 1
+                    if not success:
+                        logger.warning(
+                            "Image encoding failed: serial=%s stream=%s frame=%s",
+                            self.device_sn, stream_type, packet.frame_id,
+                        )
+                        continue
+                    metadata = {
+                        "protocol_version": PROTOCOL_VERSION,
+                        "device_sn": self.device_sn,
+                        "stream_type": stream_type,
+                        "frame_id": packet.frame_id,
+                        "timestamp": packet.timestamp,
+                        "width": packet.frame.shape[1],
+                        "height": packet.frame.shape[0],
+                        "channels": channels,
+                        "encoding": encoding,
+                    }
+                    if stream_type == "depth":
+                        metadata["depth_scale"] = packet.depth_scale
+                    socket.send_multipart([
                         self.device_sn.encode("utf-8"),
                         json.dumps(metadata, separators=(",", ":")).encode("utf-8"),
                         encoded.tobytes(),
-                    ]
-                )
+                    ])
+                    sent = True
+                if not sent:
+                    time.sleep(0.005)
         except Exception as exc:
             self._running.clear()
             self._error = exc

@@ -16,6 +16,35 @@ camera:
   device_sn: "CPC7B530001A"
 
 stream:
+  # color / depth / depth_and_color
+  type: "color"
+  # DISABLE / HW_D2C / SW_D2C；仅双流时可开启对齐
+  align_mode: "DISABLE"
+  color:
+    width: 1280
+    height: 720
+    format: "MJPG"
+    fps: 30
+    auto_exposure: true
+    exposure: null
+    gain: null
+    auto_white_balance: true
+    white_balance: null
+    brightness: null
+    sharpness: null
+    saturation: null
+    contrast: null
+    # null 表示保持设备当前值；可填 0、50 或 60（Hz）
+    power_line_frequency: null
+  depth:
+    width: 1280
+    height: 720
+    format: "Y16"
+    fps: 30
+    auto_exposure: true
+    exposure: null
+    gain: null
+  # 只影响 PUB 端的 RGB JPEG 编码，不改变相机 MJPG 格式
   jpeg_quality: 85
 
 zmq:

@@ -1,4 +1,4 @@
-"""Root entry point for the Orbbec RGB ZeroMQ service."""
+"""Root entry point for the Orbbec color/depth ZeroMQ service."""
 
 import signal
 import threading
@@ -42,7 +42,10 @@ class ZmqVideoServer:
 
         try:
             device_sn = resolve_device_sn(app_config["camera"]["device_sn"])
-            self.camera = OrbbecCamera(device_sn=device_sn)
+            self.camera = OrbbecCamera(
+                device_sn=device_sn,
+                stream_config=app_config["stream"],
+            )
             self.publisher = ZmqVideoPublisher(
                 camera=self.camera,
                 endpoint=app_config["zmq"]["publisher_endpoint"],
@@ -53,9 +56,10 @@ class ZmqVideoServer:
             self.camera.start()
             self.publisher.start()
             logger.info(
-                "Camera Server ready: device_sn=%s topic=%s bind=%s",
+                "Camera Server ready: device_sn=%s topic=%s streams=%s bind=%s",
                 device_sn,
                 device_sn,
+                self.camera.stream_types,
                 app_config["zmq"]["publisher_endpoint"],
             )
 
@@ -64,10 +68,13 @@ class ZmqVideoServer:
                     raise RuntimeError("ZMQ 发布线程异常退出") from self.publisher.error
         except KeyboardInterrupt:
             logger.info("Camera Server interrupted by user")
+            return 0
         except Exception:
             logger.exception("Camera Server stopped because of an error")
+            return 1
         finally:
             self.stop()
+        return 0
 
     def stop(self):
         self.stop_requested.set()
@@ -90,4 +97,4 @@ class ZmqVideoServer:
 
 if __name__ == "__main__":
     server = ZmqVideoServer()
-    server.start()
+    raise SystemExit(server.start())
