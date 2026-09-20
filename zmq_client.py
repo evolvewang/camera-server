@@ -1,7 +1,6 @@
 """ZeroMQ subscriber API and a small local preview example."""
 
 import json
-import math
 from typing import Any, Optional
 
 import cv2
@@ -9,11 +8,7 @@ import numpy as np
 import zmq
 
 from core.logger import get_logger
-from service.video_protocol import (
-    DEPTH_ENCODING,
-    JPEG_ENCODING,
-    PROTOCOL_VERSION,
-)
+from service.frame_codec import decode_frame
 
 
 logger = get_logger(__name__)
@@ -97,34 +92,13 @@ class ZmqVideoSubscriber:
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("视频消息的 topic 或 metadata 不是有效 UTF-8/JSON") from exc
 
-        self._validate_metadata(metadata, topic_text)
-        stream_type = metadata["stream_type"]
+        if topic_text != self.device_sn:
+            raise ValueError(f"收到非目标相机 topic: {topic_text}")
+        frame = decode_frame(metadata, image_bytes, topic_text)
 
-        image_array = np.frombuffer(image_bytes, dtype=np.uint8)
-        decode_mode = (
-            cv2.IMREAD_COLOR
-            if stream_type == "color" else cv2.IMREAD_UNCHANGED
+        self.stream_shapes[metadata["stream_type"]] = tuple(
+            int(size) for size in frame.shape
         )
-        frame = cv2.imdecode(image_array, decode_mode)
-        if frame is None:
-            raise ValueError(f"{stream_type} 视频帧解码失败")
-
-        expected_channels = 3 if stream_type == "color" else 1
-        if (
-            frame.shape[:2] != (metadata["height"], metadata["width"])
-            or metadata["channels"] != expected_channels
-        ):
-            raise ValueError("图像尺寸或通道数与元数据不一致")
-        if stream_type == "color" and (
-            frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3
-        ):
-            raise ValueError("彩色图必须为三通道 uint8 BGR")
-        if stream_type == "depth" and (
-            frame.dtype != np.uint16 or frame.ndim != 2
-        ):
-            raise ValueError("深度图必须为单通道 uint16")
-
-        self.stream_shapes[stream_type] = tuple(int(size) for size in frame.shape)
         return metadata, frame
 
     def close(self) -> None:
@@ -143,52 +117,6 @@ class ZmqVideoSubscriber:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
-
-    def _validate_metadata(self, metadata: object, topic_text: str) -> None:
-        if not isinstance(metadata, dict):
-            raise ValueError("视频 metadata 必须是 JSON 对象")
-        if topic_text != self.device_sn:
-            raise ValueError(f"收到非目标相机 topic: {topic_text}")
-        if metadata.get("protocol_version") != PROTOCOL_VERSION:
-            raise ValueError(
-                f"不支持的协议版本: {metadata.get('protocol_version')}"
-            )
-        if metadata.get("device_sn") != topic_text:
-            raise ValueError("消息 topic 与 metadata.device_sn 不一致")
-
-        stream_type = metadata.get("stream_type")
-        encoding = metadata.get("encoding")
-        expected_encoding = {
-            "color": JPEG_ENCODING,
-            "depth": DEPTH_ENCODING,
-        }.get(stream_type)
-        if encoding != expected_encoding or expected_encoding is None:
-            raise ValueError(f"不支持的视频流或编码: {stream_type}/{encoding}")
-
-        for field in ("width", "height", "channels"):
-            value = metadata.get(field)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"metadata.{field} 必须是正整数")
-        frame_id = metadata.get("frame_id")
-        if isinstance(frame_id, bool) or not isinstance(frame_id, int) or frame_id < 0:
-            raise ValueError("metadata.frame_id 必须是非负整数")
-        timestamp = metadata.get("timestamp")
-        if (
-            isinstance(timestamp, bool)
-            or not isinstance(timestamp, (int, float))
-            or not math.isfinite(timestamp)
-        ):
-            raise ValueError("metadata.timestamp 必须是有限数字")
-
-        if stream_type == "depth":
-            depth_scale = metadata.get("depth_scale")
-            if (
-                isinstance(depth_scale, bool)
-                or not isinstance(depth_scale, (int, float))
-                or not math.isfinite(depth_scale)
-                or depth_scale <= 0
-            ):
-                raise ValueError("无效 depth_scale")
 
 
 def main(

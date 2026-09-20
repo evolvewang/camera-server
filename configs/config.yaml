@@ -44,10 +44,14 @@ stream:
     auto_exposure: true
     exposure: null
     gain: null
-  # 只影响 PUB 端的 RGB JPEG 编码，不改变相机 MJPG 格式
+  # 影响 PUB 和拍照响应的 color JPEG 编码，不改变相机 MJPG 格式
   jpeg_quality: 85
 
 zmq:
   # 服务端监听地址。0.0.0.0 表示允许其他主机连接。
   publisher_endpoint: "tcp://0.0.0.0:5558"
   send_hwm: 2
+  # 请求/响应式拍照接口，与 PUB 端点分开。
+  snapshot_endpoint: "tcp://0.0.0.0:5559"
+  # 帧超过此时间未更新时返回 NO_FRAME，避免相机断线后返回旧图。
+  snapshot_max_frame_age_ms: 2000

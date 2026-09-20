@@ -8,6 +8,7 @@ from camera.orbbec_camera import OrbbecCamera, discover_device_serial_numbers
 from core.config import app_config
 from core.logger import get_logger
 from service.zmq_publisher import ZmqVideoPublisher
+from service.zmq_snapshot import ZmqSnapshotResponder
 
 
 logger = get_logger(__name__)
@@ -36,6 +37,7 @@ class ZmqVideoServer:
     def __init__(self):
         self.camera = None
         self.publisher = None
+        self.snapshot = None
         self.stop_requested = threading.Event()
 
     def start(self) -> int:
@@ -53,20 +55,29 @@ class ZmqVideoServer:
                 jpeg_quality=app_config["stream"]["jpeg_quality"],
                 send_hwm=app_config["zmq"]["send_hwm"],
             )
+            self.snapshot = ZmqSnapshotResponder(
+                camera=self.camera,
+                endpoint=app_config["zmq"]["snapshot_endpoint"],
+                jpeg_quality=app_config["stream"]["jpeg_quality"],
+                max_frame_age_ms=app_config["zmq"]["snapshot_max_frame_age_ms"],
+            )
 
             self.camera.start()
             self.publisher.start()
+            self.snapshot.start()
             logger.info(
-                "Camera Server ready: device_sn=%s topic=%s streams=%s bind=%s",
-                device_sn,
+                "Camera Server ready: device_sn=%s streams=%s pub=%s snapshot=%s",
                 device_sn,
                 self.camera.stream_types,
                 app_config["zmq"]["publisher_endpoint"],
+                app_config["zmq"]["snapshot_endpoint"],
             )
 
             while not self.stop_requested.wait(0.5):
                 if self.publisher.error is not None:
                     raise RuntimeError("ZMQ 发布线程异常退出") from self.publisher.error
+                if self.snapshot.error is not None:
+                    raise RuntimeError("ZMQ 拍照线程异常退出") from self.snapshot.error
         except KeyboardInterrupt:
             logger.info("Camera Server interrupted by user")
             return 0
@@ -79,6 +90,8 @@ class ZmqVideoServer:
 
     def stop(self) -> None:
         self.stop_requested.set()
+        if self.snapshot is not None:
+            self.snapshot.stop()
         if self.publisher is not None:
             self.publisher.stop()
         if self.camera is not None:
